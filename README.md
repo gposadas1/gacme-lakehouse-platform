@@ -1,20 +1,29 @@
-# Databricks Admin Lab on Azure
+# gacme-lakehouse-platform
 
-Infrastructure-as-code lab that deploys and administers an **Azure Databricks Premium workspace** using **Terraform** and **GitHub Actions** with **OpenID Connect (OIDC)** authentication. The lab is a hands-on environment for practicing Databricks platform administration: identities, compute governance, Unity Catalog, CI/CD, and auditing.
+Infrastructure as code for the **Azure Databricks lakehouse** behind a four-repo energy data portfolio. Terraform provisions each environment in its own Azure subscription, and GitHub Actions deploys it with **OpenID Connect (OIDC)**: no stored cloud credentials anywhere.
 
 ![Terraform](https://img.shields.io/badge/Terraform-azurerm%20~%3E%204.0-7B42BC?logo=terraform)
 ![Azure](https://img.shields.io/badge/Azure-Databricks%20Premium-0078D4?logo=microsoftazure)
 ![CI](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20%2B%20OIDC-2088FF?logo=githubactions)
 
+| Repo | Role |
+|---|---|
+| **gacme-lakehouse-platform** (this repo) | Workspace, Unity Catalog, governance, CI/CD |
+| energy-lakehouse-pipeline | EIA ingestion, bronze and silver layers |
+| energy-analytics-dbt | Gold star schema |
+| energy-analytics-powerbi | Semantic model and report |
+
+> Formerly `databricks-admin-lab`. The history is kept on purpose: it includes a real OIDC failure (`AADSTS700213`) diagnosed and fixed.
+
 ---
 
 ## Highlights
 
-- **No stored cloud credentials.** GitHub Actions authenticates to Azure through Microsoft Entra ID workload identity federation. The repository holds no client secrets or keys.
-- **Pull-request driven changes.** Every change produces a `terraform plan` on the PR for review. Only a merge to `main` runs `terraform apply`.
-- **Remote, isolated state.** Terraform state lives in a dedicated Azure Storage account and is accessed through Entra ID RBAC rather than storage account keys.
-- **Separated identities.** Distinct identities for CI/CD (service principal), day-to-day operation, and tenant and Databricks account administration.
-- **Secure defaults.** The workspace uses the Premium tier with secure cluster connectivity (no public IPs on cluster nodes), a predictable managed resource group name, and consistent resource tagging.
+- **One subscription, one identity, one state per environment.** Dev and prod are separate subscriptions in one Entra ID tenant. Each has its own CI service principal, scoped to its own subscription only, and its own Terraform state. A mistake in dev cannot reach prod.
+- **Environment-scoped OIDC trust.** Federated credentials trust a GitHub Environment (`...:environment:dev`), not a branch. Environments only accept deployments from `main`, and prod requires a manual approval.
+- **Pull requests never touch prod.** PRs run `plan` against dev only, using a pull-request credential that exists on the dev identity alone.
+- **Reproducible bootstrap.** Everything the pipeline needs but cannot create itself (state storage, identities, federation, RBAC, GitHub Environments) is one idempotent script per environment.
+- **Reusable modules.** Environments are thin roots over shared modules, so dev and prod differ only in inputs.
 
 ---
 
@@ -24,23 +33,30 @@ Infrastructure-as-code lab that deploys and administers an **Azure Databricks Pr
 flowchart LR
     dev[Developer] -->|feature branch + PR| gh[GitHub repository]
     gh --> gha[GitHub Actions]
-    gha -->|1. OIDC token| entra[Microsoft Entra ID<br/>federated credential]
-    entra -->|2. Access token| gha
-    gha -->|3. init / state| state[(Azure Storage<br/>Terraform state)]
-    gha -->|4. plan on PR<br/>5. apply on main| sub[Azure subscription]
-    sub --> rg[rg-*-dbx]
-    rg --> ws[Azure Databricks<br/>Premium workspace]
-    ws --> mrg[rg-*-dbx-managed<br/>Databricks-managed]
-    ws --> uc[Unity Catalog<br/>regional metastore]
+    gha -->|PR: plan<br/>subject pull_request| spdev[sp-gacme-github-dev]
+    gha -->|main: apply<br/>environment dev| spdev
+    gha -->|main: apply after approval<br/>environment prod| spprod[sp-gacme-github-prod]
+    spdev --> subdev[gacme-data-platform-dev]
+    spprod --> subprod[gacme-data-platform-prod]
+    subdev --> wsdev[dbw-gacme-dev]
+    subprod --> wsprod[dbw-gacme-prod]
+    wsdev --> uc[Unity Catalog<br/>regional metastore]
+    wsprod --> uc
 ```
 
-| Component | Purpose |
-|---|---|
-| `rg-<prefix>-tfstate` | Storage account and `tfstate` container for remote Terraform state |
-| `sp-<prefix>-github` | Entra ID app registration used by GitHub Actions through federated credentials |
-| `rg-<prefix>-dbx` | Resource group containing the Databricks workspace |
-| `dbw-<prefix>` | Azure Databricks workspace (Premium, secure cluster connectivity) |
-| `rg-<prefix>-dbx-managed` | Managed resource group created and locked by Azure Databricks |
+### Environments
+
+| | dev | prod |
+|---|---|---|
+| Subscription | `gacme-data-platform-dev` | `gacme-data-platform-prod` |
+| CI identity | `sp-gacme-github-dev` | `sp-gacme-github-prod` |
+| Role scope | Contributor on the dev subscription only | Contributor on the prod subscription only |
+| Terraform state key | `platform-dev.tfstate` | `platform-prod.tfstate` |
+| OIDC subjects trusted | `environment:dev`, `pull_request` | `environment:prod` |
+| Deploys on | merge to `main` | merge to `main`, after approval |
+| Resources | `rg-gacme-dbx-dev`, `dbw-gacme-dev` | `rg-gacme-dbx-prod`, `dbw-gacme-prod` |
+
+Prod is deployed to prove the pipeline, captured for this README, then destroyed. The code and the pipeline are the artifact, not an always-on workspace.
 
 ---
 
@@ -48,105 +64,105 @@ flowchart LR
 
 ```
 .
-├── .github/
-│   └── workflows/
-│       └── terraform.yml   # Plan on PR, apply on merge to main
-├── infra/
-│   ├── providers.tf        # Terraform + azurerm provider, azurerm remote backend
-│   ├── variables.tf        # prefix, location
-│   ├── main.tf             # Resource group + Databricks workspace
-│   └── outputs.tf          # Workspace URL and ID
-├── .gitignore
-└── README.md
+├── .github/workflows/
+│   ├── terraform.yml        # Triggers: lint, PR plan on dev, apply on merge
+│   └── _terraform.yml       # Reusable job: init, plan, apply for one environment
+├── bootstrap/
+│   ├── bootstrap.sh         # Idempotent one-time setup, per environment
+│   ├── dev.env.example      # Copy to dev.env (gitignored)
+│   └── prod.env.example     # Copy to prod.env (gitignored)
+└── infra/
+    ├── modules/
+    │   └── workspace/       # Resource group + Premium workspace (secure cluster connectivity)
+    └── envs/
+        ├── dev/azure/       # Root: backend key platform-dev.tfstate
+        └── prod/azure/      # Root: backend key platform-prod.tfstate
 ```
+
+Each environment folder holds one root per layer. `azure/` owns Azure resources; Phase 1 adds a `databricks/` layer (Unity Catalog, cluster policies) that reads the workspace created here.
 
 ---
 
 ## CI/CD pipeline
 
-The workflow in `.github/workflows/terraform.yml` runs when `infra/**` or workflow files change, and can also be triggered manually.
-
-| Stage | Pull request | Push to `main` |
+| Job | Pull request | Push to `main` |
 |---|:---:|:---:|
-| Checkout and set up Terraform | ✅ | ✅ |
-| `terraform init` (remote state, OIDC) | ✅ | ✅ |
-| `terraform fmt -check` | ✅ | ✅ |
-| `terraform validate` | ✅ | ✅ |
-| `terraform plan` | ✅ | ✅ |
-| `terraform apply` (from saved plan) | — | ✅ |
+| `lint`: `terraform fmt`, `validate` every root, `shellcheck` | ✅ | ✅ |
+| `plan dev` (no environment, subject `pull_request`) | ✅ | — |
+| `apply dev` (environment `dev`) | — | ✅ |
+| `apply prod` (environment `prod`, approval) | — | Phase 1b |
 
-### Authentication model
+### How OIDC trust is scoped
 
-The workflow requests an OIDC token (`permissions: id-token: write`) and passes these values to the AzureRM provider and backend:
+A job's token subject depends on whether it declares a GitHub Environment, and that drives which identity can log in:
 
-| Environment variable | Source |
-|---|---|
-| `ARM_CLIENT_ID` | `vars.AZURE_CLIENT_ID` |
-| `ARM_TENANT_ID` | `vars.AZURE_TENANT_ID` |
-| `ARM_SUBSCRIPTION_ID` | `vars.AZURE_SUBSCRIPTION_ID` |
-| `ARM_USE_OIDC` | `true` |
+| Job | Declares environment | Token subject | Trusted by |
+|---|---|---|---|
+| PR plan | no | `repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request` | dev identity only |
+| Apply dev | `dev` | `...:environment:dev` | dev identity |
+| Apply prod | `prod` | `...:environment:prod` | prod identity |
 
-Entra ID accepts the token only if its subject matches a federated credential on the app registration. GitHub uses immutable owner and repository IDs in the subject, so two credentials are configured:
+The ID-based subject still embeds the repository **name**, so renaming the repo requires new federated credentials (`bootstrap.sh <env> federation`).
 
-| Credential | Subject pattern | Used by |
+### Variables
+
+| Variable | Level | Description |
 |---|---|---|
-| Main branch | `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main` | `apply` |
-| Pull requests | `repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request` | `plan` |
+| `AZURE_TENANT_ID` | Repository | Shared Entra ID tenant |
+| `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID`, `TFSTATE_RG`, `TFSTATE_SA` | Each environment | That environment's identity, subscription, and state storage |
+| Same four | Repository | Dev values, for the PR plan job, which runs outside any environment |
 
-### Required repository variables
-
-Set these under **Settings → Secrets and variables → Actions → Variables**. They are identifiers, not secrets.
-
-| Variable | Description |
-|---|---|
-| `AZURE_CLIENT_ID` | Application (client) ID of the CI app registration |
-| `AZURE_TENANT_ID` | Entra ID tenant ID |
-| `AZURE_SUBSCRIPTION_ID` | Target Azure subscription ID |
-| `TFSTATE_RG` | Resource group of the state storage account |
-| `TFSTATE_SA` | Name of the state storage account |
-
-### Azure RBAC for the CI identity
-
-| Role | Scope | Reason |
-|---|---|---|
-| Contributor | Subscription | Create resource groups and the workspace (which creates its managed resource group) |
-| Storage Blob Data Contributor | State storage account | Read and write the state blob using Entra ID authentication |
-
-> **Note:** Subscription-scope Contributor is appropriate for an isolated lab subscription. In production, scope permissions to specific resource groups and use a separate identity per environment.
+All are identifiers, not secrets. The repo holds no secrets.
 
 ---
 
-## Getting started
+## Bootstrap
 
-### Prerequisites
+The pipeline cannot create the identity and state storage it authenticates with, so these are created once per environment from the CLI:
 
-- Azure subscription with Owner rights, in a tenant where you can create app registrations
-- GitHub account
-- macOS or Linux with `azure-cli`, `gh`, and `terraform` (>= 1.6)
+```zsh
+cp bootstrap/dev.env.example bootstrap/dev.env      # edit names if needed
+az login
+bootstrap/bootstrap.sh dev check                     # confirm subscription and repo
+bootstrap/bootstrap.sh dev all
+```
 
-### One-time bootstrap
+| Step | Creates (only if missing) |
+|---|---|
+| `providers` | Registers Storage, Network, Compute, ManagedIdentity, Databricks resource providers |
+| `state` | State resource group, StorageV2 account (TLS 1.2, no public blob access), `tfstate` container, blob access for you |
+| `identity` | App registration and service principal `sp-gacme-github-<env>` |
+| `federation` | `environment:<env>` credential, plus `pull_request` on dev |
+| `rbac` | Contributor on the environment's subscription, Storage Blob Data Contributor on its state account |
+| `github` | GitHub Environment (main-only deployments, optional required reviewer) and its variables |
 
-Bootstrap resources are created once from the CLI because the pipeline cannot create the identity and state storage it depends on.
+> Dev reuses the state storage account created before the `gacme` naming (`gdbxlabtfstate24367`). Storage accounts cannot be renamed, and moving state buys nothing.
 
-1. **Register resource providers:** `Microsoft.Storage`, `Microsoft.Network`, `Microsoft.Compute`, `Microsoft.ManagedIdentity`, and `Microsoft.Databricks`.
-2. **Create the state backend:** a resource group, a StorageV2 account (TLS 1.2 minimum, public blob access disabled), and a `tfstate` container.
-3. **Create the CI identity:** an app registration and service principal, the role assignments listed above, and the two federated credentials.
-4. **Set the repository variables** listed above.
+---
 
-### Deploy
+## Local development
 
-```bash
+```zsh
 git checkout -b feat/my-change
-# edit files under infra/
-terraform -chdir=infra fmt -recursive
-terraform -chdir=infra init -backend=false
-terraform -chdir=infra validate
+terraform fmt -recursive infra
+terraform -chdir=infra/envs/dev/azure init -backend=false
+terraform -chdir=infra/envs/dev/azure validate
 
 git commit -am "Describe the change"
 git push -u origin feat/my-change
-gh pr create --base main --fill      # pipeline posts a plan
+gh pr create --base main --fill      # pipeline posts a dev plan
 gh pr checks --watch
-gh pr merge --squash --delete-branch # pipeline applies to Azure
+gh pr merge --squash --delete-branch # pipeline applies dev
+```
+
+To run against real state locally (as yourself, not the CI identity):
+
+```zsh
+az account set --subscription gacme-data-platform-dev
+export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+terraform -chdir=infra/envs/dev/azure init \
+  -backend-config="resource_group_name=<TFSTATE_RG>" \
+  -backend-config="storage_account_name=<TFSTATE_SA>"
 ```
 
 ### Access the workspace
@@ -177,43 +193,27 @@ This lab uses a dedicated, tenant-native administrator account rather than a per
 
 ---
 
-## Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `prefix` | `gdbxlab` | Naming prefix applied to all resources |
-| `location` | `westus2` | Azure region |
-
-| Output | Description |
-|---|---|
-| `workspace_url` | HTTPS URL of the Databricks workspace |
-| `workspace_id` | Numeric Databricks workspace ID |
-
-All resources are tagged with `project`, `owner`, and `managed = terraform`.
-
 ---
 
 ## Cost and teardown
 
-An idle workspace with no running compute incurs minimal cost. Charges accrue mainly from cluster VMs and DBUs, so use auto-termination and small clusters for lab work.
+An idle workspace costs little, but not nothing: secure cluster connectivity places a NAT gateway in the managed resource group. Clusters (VMs plus DBUs) are the main cost, so use auto-termination and small clusters.
 
-To remove the workspace, run `terraform destroy` against the same remote backend. This leaves the state storage and CI identity in place, so the environment can be redeployed later with a single pipeline run.
+To remove an environment, run `terraform destroy` in its root against the same backend. State storage, identities, and federation stay in place, so the environment can be redeployed with a single pipeline run.
 
 ---
 
 ## Roadmap
 
-- [x] Terraform remote state in Azure Storage with Entra ID authentication
+- [x] Remote state in Azure Storage with Entra ID authentication
 - [x] GitHub Actions CI/CD with OIDC workload identity federation
-- [x] Azure Databricks Premium workspace with secure cluster connectivity
-- [x] Workspace admin access and Unity Catalog metastore verified
-- [x] Databricks account console access with a dedicated tenant administrator identity
-- [ ] Identity management: account-level groups, users, service principals, entitlements
-- [ ] Compute governance: cluster policies, pools, SQL warehouse
-- [ ] Unity Catalog: catalogs, schemas, grants, access connector, external locations
-- [ ] Databricks Git folders linked to this repository
+- [x] Premium workspace with secure cluster connectivity
+- [x] Account console access with a dedicated tenant administrator identity
+- [x] Phase 0: rename to `gacme-lakehouse-platform`, `gacme` prefix, modules, dev/prod roots, bootstrap script
+- [ ] Phase 1: Unity Catalog (`energy_dev` catalog, `bronze`/`silver`/`gold` schemas), access connector, external location, cluster policies
+- [ ] Phase 1b: prod subscription and identity, `prod` environment with approval gate
+- [ ] Account-level groups, service principals, and entitlements
 - [ ] Audit and usage monitoring with system tables
-- [ ] Manage Databricks objects with the Databricks Terraform provider
 
 ---
 
@@ -227,3 +227,5 @@ To remove the workspace, run `terraform destroy` against the same remote backend
 | Workspace sign-in denied for a personal Microsoft account | Launch the workspace from the Azure portal so the correct tenant is used |
 | Account console routes a personal account to the wrong tenant | Created a tenant-native Global Administrator for account console administration |
 | Pasted `#` comment lines fail in zsh | Enable `setopt interactivecomments` |
+| `-ids` federated credentials stopped matching after the repo rename | GitHub's ID-based subject still contains the repo name; added credentials for the new name |
+| PR plan needs a different subject than deploy jobs | Declaring `environment:` changes the token subject, so the PR job declares none and dev trusts `pull_request` |

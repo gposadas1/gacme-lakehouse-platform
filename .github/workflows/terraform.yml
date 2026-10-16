@@ -3,52 +3,54 @@ name: terraform
 on:
   pull_request:
     branches: [main]
-    paths: ["infra/**", ".github/workflows/**"]
+    paths: ["infra/**", "bootstrap/**", ".github/workflows/**"]
   push:
     branches: [main]
     paths: ["infra/**", ".github/workflows/**"]
   workflow_dispatch:
 
 permissions:
-  id-token: write   # required for OIDC
+  id-token: write
   contents: read
 
-env:
-  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-  ARM_USE_OIDC: "true"
-
 jobs:
-  terraform:
+  lint:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
 
-      - name: Init
-        run: >
-          terraform init -input=false
-          -backend-config="resource_group_name=${{ vars.TFSTATE_RG }}"
-          -backend-config="storage_account_name=${{ vars.TFSTATE_SA }}"
-          -backend-config="container_name=tfstate"
-          -backend-config="key=databricks-admin-lab.tfstate"
-          -backend-config="use_oidc=true"
-          -backend-config="use_azuread_auth=true"
-
       - name: Format check
-        run: terraform fmt -check -recursive
+        run: terraform fmt -check -recursive infra
 
-      - name: Validate
-        run: terraform validate
+      - name: Validate every root (no backend)
+        run: |
+          for root in infra/envs/*/*/; do
+            echo "::group::$root"
+            terraform -chdir="$root" init -backend=false -input=false
+            terraform -chdir="$root" validate
+            echo "::endgroup::"
+          done
 
-      - name: Plan
-        run: terraform plan -input=false -out=tfplan
+      - name: Shellcheck bootstrap
+        run: shellcheck -x bootstrap/*.sh
 
-      - name: Apply
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        run: terraform apply -input=false -auto-approve tfplan
+  # PRs plan against dev only; prod is never touched by an unmerged branch
+  plan-dev:
+    if: github.event_name == 'pull_request'
+    needs: lint
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: dev
+      mode: plan
+
+  apply-dev:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: lint
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: dev
+      mode: apply
+
+  # Phase 1b adds apply-prod here: needs apply-dev, gated by the prod environment's reviewer
