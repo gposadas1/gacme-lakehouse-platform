@@ -25,7 +25,7 @@ Infrastructure as code for the **Azure Databricks lakehouse** behind a four-repo
 - **Reproducible bootstrap.** Everything the pipeline needs but cannot create itself (state storage, identities, federation, RBAC, GitHub Environments) is one idempotent script per environment.
 - **Unity Catalog governance as code.** Storage credential, external location, catalog, medallion schemas and cluster policies are Terraform, owned by an account group rather than a person.
 - **Data outlives compute.** Lakehouse storage lives in its own layer and resource group, and Unity Catalog objects live in the metastore, so the workspace can be destroyed when idle and redeployed without touching data.
-- **Least privilege for CI.** The pipeline identity can create role assignments for exactly one role (Storage Blob Data Contributor), enforced by an Azure ABAC condition.
+- **Least privilege for CI.** The pipeline identity can create role assignments for exactly two roles (Storage Blob Data Contributor and Reader), enforced by an Azure ABAC condition.
 - **Reusable modules.** Environments are thin roots over shared modules, so dev and prod differ only in inputs.
 
 ---
@@ -95,7 +95,7 @@ Each environment is split into layers with separate state, applied in this order
 
 | Layer | Owns | Lifecycle |
 |---|---|---|
-| `lake` | `rg-gacme-lake-<env>`, ADLS Gen2 account, one container per data domain, access connector `dbac-gacme-<env>` and its blob role | Permanent. The storage account has `prevent_destroy`. |
+| `lake` | `rg-gacme-lake-<env>`, ADLS Gen2 account, one container per data domain, access connector `dbac-gacme-<env>` with blob access to the account and Reader on itself | Permanent. The storage account has `prevent_destroy`. |
 | `azure` | `rg-gacme-dbx-<env>`, workspace `dbw-gacme-<env>` | Destroyed and redeployed to pause the environment |
 | `databricks` | Unity Catalog objects and cluster policies, through the workspace | Metastore objects persist across workspace redeploys; policies are recreated |
 
@@ -169,7 +169,7 @@ bootstrap/bootstrap.sh dev all
 | `state` | State resource group, StorageV2 account (TLS 1.2, no public blob access), `tfstate` container, blob access for you |
 | `identity` | App registration and service principal `sp-gacme-github-<env>` |
 | `federation` | `environment:<env>` credential, plus `pull_request` on dev |
-| `rbac` | Contributor on the environment's subscription, Storage Blob Data Contributor on its state account, and Role Based Access Control Administrator limited by condition to assigning Storage Blob Data Contributor |
+| `rbac` | Contributor on the environment's subscription, Storage Blob Data Contributor on its state account, and Role Based Access Control Administrator limited by condition to assigning Storage Blob Data Contributor and Reader |
 | `github` | GitHub Environment (main-only deployments, optional required reviewer) and its variables |
 
 Unity Catalog also needs two one-time account console steps, which have no subscription-level API: create the account group `gacme-platform-admins` with you and the CI service principal as members, and make that group the metastore admin.
@@ -274,3 +274,4 @@ State storage, identities, and federation stay in place, so nothing needs re-boo
 | Pasted `#` comment lines fail in zsh | Enable `setopt interactivecomments` |
 | `-ids` federated credentials stopped matching after the repo rename | GitHub's ID-based subject still contains the repo name; added credentials for the new name |
 | PR plan needs a different subject than deploy jobs | Declaring `environment:` changes the token subject, so the PR job declares none and dev trusts `pull_request` |
+| `Registering a credential requires managed identity (MI) to have a Reader role scoped to MI itself` | Unity Catalog checks the access connector can read itself; Terraform grants it Reader on its own resource |
