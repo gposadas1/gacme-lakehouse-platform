@@ -13,3 +13,7 @@ output "workspace_url" {
 output "workspace_id" {
   value = module.workspace.workspace_id
 }
+
+output "workspace_resource_id" {
+  value = module.workspace.workspace_resource_id
+}

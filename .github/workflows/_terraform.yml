@@ -1,4 +1,4 @@
-# Reusable job: init, check, plan, and optionally apply (or destroy) one environment's Terraform root.
+# Reusable job: plan, apply or destroy one environment's Terraform layers via ci/terraform.sh.
 #
 # OIDC trust depends on whether the job declares a GitHub Environment:
 #   mode=plan  -> no environment -> token subject ...:pull_request  (trusted by the dev identity only)
@@ -34,34 +34,18 @@ jobs:
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      ARM_USE_OIDC: "true"
+      ARM_USE_OIDC: "true" # azurerm provider and backend
+      DATABRICKS_AUTH_TYPE: github-oidc-azure # databricks provider, same identity
+      TFSTATE_RG: ${{ vars.TFSTATE_RG }}
+      TFSTATE_SA: ${{ vars.TFSTATE_SA }}
+      ENVIRONMENT: ${{ inputs.environment }}
       MODE: ${{ inputs.mode }}
-    defaults:
-      run:
-        working-directory: infra/envs/${{ inputs.environment }}/azure
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false # the script reads `terraform output -raw`
 
-      - name: Init
-        run: >
-          terraform init -input=false
-          -backend-config="resource_group_name=${{ vars.TFSTATE_RG }}"
-          -backend-config="storage_account_name=${{ vars.TFSTATE_SA }}"
-          -backend-config="use_oidc=true"
-
-      - name: Validate
-        run: terraform validate
-
-      - name: Plan
-        run: |
-          if [ "$MODE" = destroy ]; then
-            terraform plan -input=false -destroy -out=tfplan
-          else
-            terraform plan -input=false -out=tfplan
-          fi
-
-      - name: Apply
-        if: inputs.mode != 'plan'
-        run: terraform apply -input=false -auto-approve tfplan
+      - name: Terraform (${{ inputs.mode }})
+        run: ci/terraform.sh "$ENVIRONMENT" "$MODE"

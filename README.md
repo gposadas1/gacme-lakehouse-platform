@@ -23,6 +23,9 @@ Infrastructure as code for the **Azure Databricks lakehouse** behind a four-repo
 - **Environment-scoped OIDC trust.** Federated credentials trust a GitHub Environment (`...:environment:dev`), not a branch. Environments only accept deployments from `main`, and prod requires a manual approval.
 - **Pull requests never touch prod.** PRs run `plan` against dev only, using a pull-request credential that exists on the dev identity alone.
 - **Reproducible bootstrap.** Everything the pipeline needs but cannot create itself (state storage, identities, federation, RBAC, GitHub Environments) is one idempotent script per environment.
+- **Unity Catalog governance as code.** Storage credential, external location, catalog, medallion schemas and cluster policies are Terraform, owned by an account group rather than a person.
+- **Data outlives compute.** Lakehouse storage lives in its own layer and resource group, and Unity Catalog objects live in the metastore, so the workspace can be destroyed when idle and redeployed without touching data.
+- **Least privilege for CI.** The pipeline identity can create role assignments for exactly one role (Storage Blob Data Contributor), enforced by an Azure ABAC condition.
 - **Reusable modules.** Environments are thin roots over shared modules, so dev and prod differ only in inputs.
 
 ---
@@ -51,10 +54,10 @@ flowchart LR
 | Subscription | `gacme-data-platform-dev` | `gacme-data-platform-prod` |
 | CI identity | `sp-gacme-github-dev` | `sp-gacme-github-prod` |
 | Role scope | Contributor on the dev subscription only | Contributor on the prod subscription only |
-| Terraform state key | `platform-dev.tfstate` | `platform-prod.tfstate` |
+| Terraform state keys | `platform-dev.tfstate`, `platform-dev-lake.tfstate`, `platform-dev-databricks.tfstate` | `platform-prod.tfstate` (lake and databricks layers in Phase 1b) |
 | OIDC subjects trusted | `environment:dev`, `pull_request` | `environment:prod` |
 | Deploys on | merge to `main` | merge to `main`, after approval |
-| Resources | `rg-gacme-dbx-dev`, `dbw-gacme-dev` | `rg-gacme-dbx-prod`, `dbw-gacme-prod` |
+| Resources | `rg-gacme-dbx-dev`, `dbw-gacme-dev`, `rg-gacme-lake-dev`, `stgacmelakedev`, `dbac-gacme-dev`, catalog `energy_dev` | `rg-gacme-dbx-prod`, `dbw-gacme-prod` |
 
 Prod is deployed to prove the pipeline, captured for this README, then destroyed. The code and the pipeline are the artifact, not an always-on workspace.
 
@@ -65,21 +68,53 @@ Prod is deployed to prove the pipeline, captured for this README, then destroyed
 ```
 .
 ├── .github/workflows/
-│   ├── terraform.yml        # Triggers: lint, PR plan on dev, apply on merge
-│   └── _terraform.yml       # Reusable job: init, plan, apply for one environment
+│   ├── terraform.yml        # Triggers: lint, PR plan on dev, apply on merge, manual deploy/destroy
+│   └── _terraform.yml       # Reusable job: runs ci/terraform.sh for one environment
+├── ci/
+│   └── terraform.sh         # Plans/applies an environment's layers in order (CI and local)
 ├── bootstrap/
 │   ├── bootstrap.sh         # Idempotent one-time setup, per environment
 │   ├── dev.env.example      # Copy to dev.env (gitignored)
 │   └── prod.env.example     # Copy to prod.env (gitignored)
 └── infra/
     ├── modules/
-    │   └── workspace/       # Resource group + Premium workspace (secure cluster connectivity)
+    │   ├── workspace/       # Resource group + Premium workspace (secure cluster connectivity)
+    │   ├── lake/            # ADLS Gen2 account, container per domain, access connector
+    │   └── governance/      # Storage credential, external locations, catalogs, schemas, cluster policies
     └── envs/
-        ├── dev/azure/       # Root: backend key platform-dev.tfstate
-        └── prod/azure/      # Root: backend key platform-prod.tfstate
+        ├── dev/
+        │   ├── lake/        # platform-dev-lake.tfstate
+        │   ├── azure/       # platform-dev.tfstate
+        │   └── databricks/  # platform-dev-databricks.tfstate
+        └── prod/azure/      # platform-prod.tfstate
 ```
 
-Each environment folder holds one root per layer. `azure/` owns Azure resources; Phase 1 adds a `databricks/` layer (Unity Catalog, cluster policies) that reads the workspace created here.
+### Layers
+
+Each environment is split into layers with separate state, applied in this order by `ci/terraform.sh`:
+
+| Layer | Owns | Lifecycle |
+|---|---|---|
+| `lake` | `rg-gacme-lake-<env>`, ADLS Gen2 account, one container per data domain, access connector `dbac-gacme-<env>` and its blob role | Permanent. The storage account has `prevent_destroy`. |
+| `azure` | `rg-gacme-dbx-<env>`, workspace `dbw-gacme-<env>` | Destroyed and redeployed to pause the environment |
+| `databricks` | Unity Catalog objects and cluster policies, through the workspace | Metastore objects persist across workspace redeploys; policies are recreated |
+
+The `databricks` layer takes the other layers' outputs as inputs, so it is skipped while the workspace or lake is not deployed.
+
+---
+
+## Unity Catalog and governance
+
+| Object | dev | Notes |
+|---|---|---|
+| Storage credential | `sc_gacme_dev` | Wraps the access connector's managed identity, so no keys or secrets |
+| External location | `el_gacme_energy_dev` | `abfss://energy@stgacmelakedev.dfs.core.windows.net/` |
+| Catalog | `energy_dev` | Managed storage under the external location; one catalog per data domain |
+| Schemas | `bronze`, `silver`, `gold` | Medallion layers |
+| Cluster policies | `gacme-dev-single-node`, `gacme-dev-jobs` | Small VM allowlist, single-user (Unity Catalog) access mode, auto-termination, spot for jobs |
+| Owner of all of the above | `gacme-platform-admins` | Account group holding the operator and the CI identity; metastore admin |
+
+Adding a data domain (for example weather) means adding a container to the lake layer and a domain to the databricks layer: it gets its own external location and `weather_dev` catalog.
 
 ---
 
@@ -134,8 +169,10 @@ bootstrap/bootstrap.sh dev all
 | `state` | State resource group, StorageV2 account (TLS 1.2, no public blob access), `tfstate` container, blob access for you |
 | `identity` | App registration and service principal `sp-gacme-github-<env>` |
 | `federation` | `environment:<env>` credential, plus `pull_request` on dev |
-| `rbac` | Contributor on the environment's subscription, Storage Blob Data Contributor on its state account |
+| `rbac` | Contributor on the environment's subscription, Storage Blob Data Contributor on its state account, and Role Based Access Control Administrator limited by condition to assigning Storage Blob Data Contributor |
 | `github` | GitHub Environment (main-only deployments, optional required reviewer) and its variables |
+
+Unity Catalog also needs two one-time account console steps, which have no subscription-level API: create the account group `gacme-platform-admins` with you and the CI service principal as members, and make that group the metastore admin.
 
 > Dev reuses the state storage account created before the `gacme` naming (`gdbxlabtfstate24367`). Storage accounts cannot be renamed, and moving state buys nothing.
 
@@ -146,8 +183,9 @@ bootstrap/bootstrap.sh dev all
 ```zsh
 git checkout -b feat/my-change
 terraform fmt -recursive infra
-terraform -chdir=infra/envs/dev/azure init -backend=false
-terraform -chdir=infra/envs/dev/azure validate
+for root in infra/envs/dev/*/; do
+  terraform -chdir="$root" init -backend=false && terraform -chdir="$root" validate
+done
 
 git commit -am "Describe the change"
 git push -u origin feat/my-change
@@ -161,10 +199,11 @@ To run against real state locally (as yourself, not the CI identity):
 ```zsh
 az account set --subscription gacme-data-platform-dev
 export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-terraform -chdir=infra/envs/dev/azure init \
-  -backend-config="resource_group_name=<TFSTATE_RG>" \
-  -backend-config="storage_account_name=<TFSTATE_SA>"
+export TFSTATE_RG=<TFSTATE_RG> TFSTATE_SA=<TFSTATE_SA>
+ci/terraform.sh dev plan
 ```
+
+The script is the same one CI runs; locally it authenticates with your `az login` session.
 
 ### Access the workspace
 
@@ -202,7 +241,7 @@ An idle workspace costs little, but not nothing: secure cluster connectivity pla
 
 Dev is meant to be paused when idle. From the **Actions** tab, open **terraform**, choose **Run workflow** on `main`, and pick:
 
-- `destroy` to tear down the dev workspace and its resource group (the NAT gateway goes with it)
+- `destroy` to tear down the dev workspace and its resource group (the NAT gateway goes with it). The lake storage and the Unity Catalog objects stay, with their data.
 - `deploy` to bring it back, in about 10 minutes
 
 State storage, identities, and federation stay in place, so nothing needs re-bootstrapping. Anything that exists only inside the workspace (UI-created notebooks, jobs, clusters) is lost on destroy; keep it in Git or Terraform. A push to `main` that touches `infra/` also redeploys dev.
@@ -216,9 +255,9 @@ State storage, identities, and federation stay in place, so nothing needs re-boo
 - [x] Premium workspace with secure cluster connectivity
 - [x] Account console access with a dedicated tenant administrator identity
 - [x] Phase 0: rename to `gacme-lakehouse-platform`, `gacme` prefix, modules, dev/prod roots, bootstrap script
-- [ ] Phase 1: Unity Catalog (`energy_dev` catalog, `bronze`/`silver`/`gold` schemas), access connector, external location, cluster policies
+- [x] Phase 1: Unity Catalog (`energy_dev` catalog, `bronze`/`silver`/`gold` schemas), access connector, external location, cluster policies
 - [ ] Phase 1b: prod subscription and identity, `prod` environment with approval gate
-- [ ] Account-level groups, service principals, and entitlements
+- [ ] Account-level groups and entitlements as code (account-scoped Terraform)
 - [ ] Audit and usage monitoring with system tables
 
 ---
