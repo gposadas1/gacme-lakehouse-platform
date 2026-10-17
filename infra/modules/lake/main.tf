@@ -56,10 +56,19 @@ resource "azurerm_databricks_access_connector" "this" {
   tags = var.tags
 }
 
-# The CI identity can assign this one role and no other (conditional RBAC Administrator, see bootstrap)
+# The CI identity can assign only these two roles (conditional RBAC Administrator, see bootstrap)
 resource "azurerm_role_assignment" "connector_blob" {
   scope                = azurerm_storage_account.lake.id
   role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azurerm_databricks_access_connector.this.identity[0].principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# Unity Catalog checks that the connector's identity can read the connector itself before it
+# accepts a storage credential for it
+resource "azurerm_role_assignment" "connector_self_reader" {
+  scope                = azurerm_databricks_access_connector.this.id
+  role_definition_name = "Reader"
   principal_id         = azurerm_databricks_access_connector.this.identity[0].principal_id
   principal_type       = "ServicePrincipal"
 }

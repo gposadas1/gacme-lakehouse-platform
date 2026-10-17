@@ -153,10 +153,13 @@ cmd_federation() {
   fi
 }
 
-# Lets the holder create and delete role assignments for Storage Blob Data Contributor only,
-# which Terraform needs to grant the Unity Catalog access connector access to lake storage.
+# Lets the holder create and delete role assignments for these roles only, which Terraform needs
+# to give the Unity Catalog access connector access to lake storage (Storage Blob Data
+# Contributor) and to itself (Reader, checked by Unity Catalog when registering the credential).
 BLOB_DATA_CONTRIBUTOR_ID="ba92f5b4-2d11-453d-a403-e96b0029c9fe"
-RBAC_CONDITION="((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {$BLOB_DATA_CONTRIBUTOR_ID})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {$BLOB_DATA_CONTRIBUTOR_ID}))"
+READER_ID="acdd72a7-3385-48ef-bd42-f606fba81ae7"
+ASSIGNABLE_ROLE_IDS="$BLOB_DATA_CONTRIBUTOR_ID, $READER_ID"
+RBAC_CONDITION="((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {$ASSIGNABLE_ROLE_IDS})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {$ASSIGNABLE_ROLE_IDS}))"
 
 cmd_rbac() {
   log "Azure RBAC for $APP_NAME"
@@ -166,17 +169,22 @@ cmd_rbac() {
   ensure_role "Contributor" "$sp" ServicePrincipal "$scope"
   ensure_role "Storage Blob Data Contributor" "$sp" ServicePrincipal "$(state_sa_id)"
 
-  # Contributor can't assign roles. This grant can, but only the one role above.
-  local role="Role Based Access Control Administrator"
-  if [[ "$(az role assignment list --assignee "$sp" --role "$role" --scope "$scope" --query "length(@)" -o tsv)" == "0" ]]; then
-    az role assignment create --role "$role" --assignee-object-id "$sp" \
-      --assignee-principal-type ServicePrincipal --scope "$scope" \
-      --condition "$RBAC_CONDITION" --condition-version 2.0 \
-      --description "Terraform may assign Storage Blob Data Contributor only" -o none
-    ok "assigned '$role' (Storage Blob Data Contributor only)"
-  else
+  # Contributor can't assign roles. This grant can, but only the roles above.
+  local role="Role Based Access Control Administrator" existing
+  existing=$(az role assignment list --assignee "$sp" --role "$role" --scope "$scope" --query "[0].{id:id, condition:condition}" -o tsv)
+  if [[ -n "$existing" && "${existing#*$'\t'}" == "$RBAC_CONDITION" ]]; then
     ok "'$role' already assigned"
+    return
   fi
+  if [[ -n "$existing" ]]; then
+    # The allowed roles changed: replace the assignment so its condition matches
+    az role assignment delete --ids "${existing%%$'\t'*}"
+  fi
+  az role assignment create --role "$role" --assignee-object-id "$sp" \
+    --assignee-principal-type ServicePrincipal --scope "$scope" \
+    --condition "$RBAC_CONDITION" --condition-version 2.0 \
+    --description "Terraform may assign Storage Blob Data Contributor and Reader only" -o none
+  ok "assigned '$role' (Storage Blob Data Contributor and Reader only)"
 }
 
 cmd_github() {
