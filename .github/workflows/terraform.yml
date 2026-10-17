@@ -3,10 +3,10 @@ name: terraform
 on:
   pull_request:
     branches: [main]
-    paths: ["infra/**", "bootstrap/**", ".github/workflows/**"]
+    paths: ["infra/**", "ci/**", "bootstrap/**", ".github/workflows/**"]
   push:
     branches: [main]
-    paths: ["infra/**", ".github/workflows/**"]
+    paths: ["infra/**", "ci/**", ".github/workflows/**"]
   # Manual runs from the Actions tab: deploy (re)creates dev, destroy tears it down to stop idle cost
   workflow_dispatch:
     inputs:
@@ -40,8 +40,8 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Shellcheck bootstrap
-        run: shellcheck -x bootstrap/*.sh
+      - name: Shellcheck
+        run: shellcheck -x bootstrap/*.sh ci/*.sh
 
   # PRs plan against dev only; prod is never touched by an unmerged branch
   plan-dev:
