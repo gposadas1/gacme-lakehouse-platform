@@ -55,9 +55,10 @@ output() { tf "$1" output -raw "$2" 2>/dev/null || true; }
 databricks_inputs() {
   TF_VAR_workspace_url="$(output azure workspace_url)"
   TF_VAR_workspace_resource_id="$(output azure workspace_resource_id)"
+  TF_VAR_workspace_id="$(output azure workspace_id)"
   TF_VAR_access_connector_id="$(output lake access_connector_id)"
   TF_VAR_storage_account_name="$(output lake storage_account_name)"
-  export TF_VAR_workspace_url TF_VAR_workspace_resource_id TF_VAR_access_connector_id TF_VAR_storage_account_name
+  export TF_VAR_workspace_url TF_VAR_workspace_resource_id TF_VAR_workspace_id TF_VAR_access_connector_id TF_VAR_storage_account_name
   [[ -n "$TF_VAR_workspace_url" && -n "$TF_VAR_access_connector_id" ]]
 }
 

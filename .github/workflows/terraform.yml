@@ -7,11 +7,17 @@ on:
   push:
     branches: [main]
     paths: ["infra/**", "ci/**", ".github/workflows/**"]
-  # Manual runs from the Actions tab: deploy (re)creates dev, destroy tears it down to stop idle cost
+  # Manual runs from the Actions tab: deploy (re)creates an environment's workspace, destroy
+  # tears it down to stop idle cost. Prod runs wait for the prod environment's reviewer either way.
   workflow_dispatch:
     inputs:
+      environment:
+        description: which environment
+        type: choice
+        options: [dev, prod]
+        default: dev
       action:
-        description: deploy or destroy the dev environment
+        description: deploy or destroy
         type: choice
         options: [deploy, destroy]
         default: deploy
@@ -55,21 +61,44 @@ jobs:
   apply-dev:
     if: >-
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || inputs.action == 'deploy')
+      (github.event_name == 'push' || (inputs.environment == 'dev' && inputs.action == 'deploy'))
     needs: lint
     uses: ./.github/workflows/_terraform.yml
     with:
       environment: dev
       mode: apply
 
-  # Manual only. State, identities and federation stay, so a deploy run brings dev back.
+  # After dev on every merge (or alone from the Actions tab), and only once the reviewer approves.
+  # A skipped apply-dev (manual prod run) doesn't block it; a failed one does.
+  apply-prod:
+    if: >-
+      !cancelled() &&
+      needs.lint.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.apply-dev.result) &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (inputs.environment == 'prod' && inputs.action == 'deploy'))
+    needs: [lint, apply-dev]
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: prod
+      mode: apply
+
+  # Manual only. Removes the workspace, keeps the lake, catalog, state and identities, so a
+  # deploy run brings the environment back.
   destroy-dev:
     if: >-
       github.ref == 'refs/heads/main' &&
-      github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+      github.event_name == 'workflow_dispatch' && inputs.environment == 'dev' && inputs.action == 'destroy'
     uses: ./.github/workflows/_terraform.yml
     with:
       environment: dev
       mode: destroy
 
-  # Phase 1b adds apply-prod here: needs apply-dev, gated by the prod environment's reviewer
+  destroy-prod:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch' && inputs.environment == 'prod' && inputs.action == 'destroy'
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: prod
+      mode: destroy

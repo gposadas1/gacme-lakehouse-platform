@@ -36,20 +36,40 @@ resource "databricks_external_location" "domain" {
   comment         = "The ${each.value} container. Managed by Terraform."
 }
 
+# ISOLATED: only this environment's workspace can use the catalog, although dev and prod share
+# one metastore. Owners and metastore admins still see it elsewhere, so Terraform can rebind it
+# after the workspace is rebuilt.
 resource "databricks_catalog" "domain" {
   for_each = var.domains
 
-  name         = "${each.value}_${var.environment}"
-  storage_root = "${databricks_external_location.domain[each.value].url}${each.value}_${var.environment}"
-  owner        = var.admin_group
-  comment      = "${each.value} data, ${var.environment}. Managed by Terraform."
+  name           = "${each.value}_${var.environment}"
+  storage_root   = "${databricks_external_location.domain[each.value].url}${each.value}_${var.environment}"
+  isolation_mode = "ISOLATED"
+  owner          = var.admin_group
+  comment        = "${each.value} data, ${var.environment}. Managed by Terraform."
 }
 
+resource "databricks_workspace_binding" "catalog" {
+  for_each = var.domains
+
+  securable_type = "catalog"
+  securable_name = databricks_catalog.domain[each.value].name
+  workspace_id   = var.workspace_id
+
+  # A rebuilt workspace has a new ID: bind it before unbinding the old one
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Each layer gets its own folder, <container>/<catalog>/<layer>/, so the medallion layers are
+# visible in storage and can get their own lifecycle rules later.
 resource "databricks_schema" "layer" {
   for_each = local.schemas
 
   catalog_name = databricks_catalog.domain[each.value.domain].name
   name         = each.value.name
+  storage_root = "${databricks_catalog.domain[each.value.domain].storage_root}/${each.value.name}"
   owner        = var.admin_group
   comment      = "Medallion ${each.value.name} layer. Managed by Terraform."
 }
