@@ -85,12 +85,13 @@ Each environment folder holds one root per layer. `azure/` owns Azure resources;
 
 ## CI/CD pipeline
 
-| Job | Pull request | Push to `main` |
-|---|:---:|:---:|
-| `lint`: `terraform fmt`, `validate` every root, `shellcheck` | ✅ | ✅ |
-| `plan dev` (no environment, subject `pull_request`) | ✅ | — |
-| `apply dev` (environment `dev`) | — | ✅ |
-| `apply prod` (environment `prod`, approval) | — | Phase 1b |
+| Job | Pull request | Push to `main` | Manual run |
+|---|:---:|:---:|:---:|
+| `lint`: `terraform fmt`, `validate` every root, `shellcheck` | ✅ | ✅ | ✅ |
+| `plan dev` (no environment, subject `pull_request`) | ✅ | — | — |
+| `apply dev` (environment `dev`) | — | ✅ | `deploy` |
+| `destroy dev` (environment `dev`) | — | — | `destroy` |
+| `apply prod` (environment `prod`, approval) | — | Phase 1b | — |
 
 ### How OIDC trust is scoped
 
@@ -199,7 +200,12 @@ This lab uses a dedicated, tenant-native administrator account rather than a per
 
 An idle workspace costs little, but not nothing: secure cluster connectivity places a NAT gateway in the managed resource group. Clusters (VMs plus DBUs) are the main cost, so use auto-termination and small clusters.
 
-To remove an environment, run `terraform destroy` in its root against the same backend. State storage, identities, and federation stay in place, so the environment can be redeployed with a single pipeline run.
+Dev is meant to be paused when idle. From the **Actions** tab, open **terraform**, choose **Run workflow** on `main`, and pick:
+
+- `destroy` to tear down the dev workspace and its resource group (the NAT gateway goes with it)
+- `deploy` to bring it back, in about 10 minutes
+
+State storage, identities, and federation stay in place, so nothing needs re-bootstrapping. Anything that exists only inside the workspace (UI-created notebooks, jobs, clusters) is lost on destroy; keep it in Git or Terraform. A push to `main` that touches `infra/` also redeploys dev.
 
 ---
 

@@ -7,7 +7,14 @@ on:
   push:
     branches: [main]
     paths: ["infra/**", ".github/workflows/**"]
+  # Manual runs from the Actions tab: deploy (re)creates dev, destroy tears it down to stop idle cost
   workflow_dispatch:
+    inputs:
+      action:
+        description: deploy or destroy the dev environment
+        type: choice
+        options: [deploy, destroy]
+        default: deploy
 
 permissions:
   id-token: write
@@ -46,11 +53,23 @@ jobs:
       mode: plan
 
   apply-dev:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || inputs.action == 'deploy')
     needs: lint
     uses: ./.github/workflows/_terraform.yml
     with:
       environment: dev
       mode: apply
+
+  # Manual only. State, identities and federation stay, so a deploy run brings dev back.
+  destroy-dev:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: dev
+      mode: destroy
 
   # Phase 1b adds apply-prod here: needs apply-dev, gated by the prod environment's reviewer
