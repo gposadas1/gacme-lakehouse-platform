@@ -1,6 +1,6 @@
 variable "prefix" {
   type    = string
-  default = "gdbxlab"
+  default = "gacme"
 }
 
 variable "location" {

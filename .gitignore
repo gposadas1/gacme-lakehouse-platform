@@ -1,6 +1,9 @@
 .terraform/
 *.tfstate*
 *.tfvars
+*.tfplan
+tfplan
 .lab.env
+bootstrap/*.env
 fc-*.json
 .DS_Store
