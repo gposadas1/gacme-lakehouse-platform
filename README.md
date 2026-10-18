@@ -20,7 +20,7 @@ Infrastructure as code for the **Azure Databricks lakehouse** behind a four-repo
 ## Highlights
 
 - **One subscription, one identity, one state per environment.** Dev and prod are separate subscriptions in one Entra ID tenant. Each has its own CI service principal, scoped to its own subscription only, and its own Terraform state. A mistake in dev cannot reach prod.
-- **Environment-scoped OIDC trust.** Federated credentials trust a GitHub Environment (`...:environment:dev`), not a branch. Environments only accept deployments from `main`, and prod requires a manual approval.
+- **Environment-scoped OIDC trust.** Federated credentials trust a GitHub Environment (`...:environment:dev`), not a branch. Environments only accept deployments from `main`, and prod is only deployed by a deliberate manual run.
 - **Pull requests never touch prod.** PRs run `plan` against dev only, using a pull-request credential that exists on the dev identity alone.
 - **Reproducible bootstrap.** Everything the pipeline needs but cannot create itself (state storage, identities, federation, RBAC, GitHub Environments) is one idempotent script per environment.
 - **Unity Catalog governance as code.** Storage credential, external location, catalog, medallion schemas and cluster policies are Terraform, owned by an account group rather than a person.
@@ -38,7 +38,7 @@ flowchart LR
     gh --> gha[GitHub Actions]
     gha -->|PR: plan<br/>subject pull_request| spdev[sp-gacme-github-dev]
     gha -->|main: apply<br/>environment dev| spdev
-    gha -->|main: apply after approval<br/>environment prod| spprod[sp-gacme-github-prod]
+    gha -->|main: manual run<br/>environment prod| spprod[sp-gacme-github-prod]
     spdev --> subdev[gacme-data-platform-dev]
     spprod --> subprod[gacme-data-platform-prod]
     subdev --> wsdev[dbw-gacme-dev]
@@ -54,10 +54,10 @@ flowchart LR
 | Subscription | `gacme-data-platform-dev` | `gacme-data-platform-prod` |
 | CI identity | `sp-gacme-github-dev` | `sp-gacme-github-prod` |
 | Role scope | Contributor on the dev subscription only | Contributor on the prod subscription only |
-| Terraform state keys | `platform-dev.tfstate`, `platform-dev-lake.tfstate`, `platform-dev-databricks.tfstate` | `platform-prod.tfstate` (lake and databricks layers in Phase 1b) |
+| Terraform state keys | `platform-dev.tfstate`, `platform-dev-lake.tfstate`, `platform-dev-databricks.tfstate` | `platform-prod.tfstate`, `platform-prod-lake.tfstate`, `platform-prod-databricks.tfstate` |
 | OIDC subjects trusted | `environment:dev`, `pull_request` | `environment:prod` |
-| Deploys on | merge to `main` | merge to `main`, after approval |
-| Resources | `rg-gacme-dbx-dev`, `dbw-gacme-dev`, `rg-gacme-lake-dev`, `stgacmelakedev`, `dbac-gacme-dev`, catalog `energy_dev` | `rg-gacme-dbx-prod`, `dbw-gacme-prod` |
+| Deploys on | merge to `main` | manual run from `main` (approval gate once the repo is public) |
+| Resources | `rg-gacme-dbx-dev`, `dbw-gacme-dev`, `rg-gacme-lake-dev`, `stgacmelakedev`, `dbac-gacme-dev`, catalog `energy_dev` | `rg-gacme-dbx-prod`, `dbw-gacme-prod`, `rg-gacme-lake-prod`, `stgacmelakeprod`, `dbac-gacme-prod`, catalog `energy_prod` |
 
 Prod is deployed to prove the pipeline, captured for this README, then destroyed. The code and the pipeline are the artifact, not an always-on workspace.
 
@@ -86,7 +86,7 @@ Prod is deployed to prove the pipeline, captured for this README, then destroyed
         │   ├── lake/        # platform-dev-lake.tfstate
         │   ├── azure/       # platform-dev.tfstate
         │   └── databricks/  # platform-dev-databricks.tfstate
-        └── prod/azure/      # platform-prod.tfstate
+        └── prod/            # same three layers, platform-prod[-lake|-databricks].tfstate
 ```
 
 ### Layers
@@ -105,14 +105,16 @@ The `databricks` layer takes the other layers' outputs as inputs, so it is skipp
 
 ## Unity Catalog and governance
 
-| Object | dev | Notes |
-|---|---|---|
-| Storage credential | `sc_gacme_dev` | Wraps the access connector's managed identity, so no keys or secrets |
-| External location | `el_gacme_energy_dev` | `abfss://energy@stgacmelakedev.dfs.core.windows.net/` |
-| Catalog | `energy_dev` | Managed storage under the external location; one catalog per data domain |
-| Schemas | `bronze`, `silver`, `gold` | Medallion layers |
-| Cluster policies | `gacme-dev-single-node`, `gacme-dev-jobs` | Small VM allowlist, single-user (Unity Catalog) access mode, auto-termination, spot for jobs |
+| Object | dev | prod | Notes |
+|---|---|---|---|
+| Storage credential | `sc_gacme_dev` | `sc_gacme_prod` | Wraps the access connector's managed identity, so no keys or secrets |
+| External location | `el_gacme_energy_dev` | `el_gacme_energy_prod` | `abfss://energy@stgacmelake<env>.dfs.core.windows.net/` |
+| Catalog | `energy_dev` | `energy_prod` | One per data domain, **bound to its own environment's workspace only** |
+| Schemas | `bronze`, `silver`, `gold` | same | Medallion layers, each in its own folder: `energy/energy_<env>/<layer>/` |
+| Cluster policies | `gacme-dev-single-node`, `gacme-dev-jobs` | `gacme-prod-*` | Small VM allowlist, single-user (Unity Catalog) access mode, auto-termination, spot for jobs |
 | Owner of all of the above | `gacme-platform-admins` | Account group holding the operator and the CI identity; metastore admin |
+
+Dev and prod share one regional metastore, so catalogs are set to `ISOLATED` and bound to their environment's workspace: `energy_prod` cannot be queried from the dev workspace, and the reverse. The binding follows the workspace ID, so a redeployed workspace is rebound on the next apply.
 
 Adding a data domain (for example weather) means adding a container to the lake layer and a domain to the databricks layer: it gets its own external location and `weather_dev` catalog.
 
@@ -124,9 +126,11 @@ Adding a data domain (for example weather) means adding a container to the lake 
 |---|:---:|:---:|:---:|
 | `lint`: `terraform fmt`, `validate` every root, `shellcheck` | ✅ | ✅ | ✅ |
 | `plan dev` (no environment, subject `pull_request`) | ✅ | — | — |
-| `apply dev` (environment `dev`) | — | ✅ | `deploy` |
-| `destroy dev` (environment `dev`) | — | — | `destroy` |
-| `apply prod` (environment `prod`, approval) | — | Phase 1b | — |
+| `apply dev` (environment `dev`) | — | ✅ | `dev` + `deploy` |
+| `apply prod` (environment `prod`) | — | — | `prod` + `deploy` |
+| `destroy dev` / `destroy prod` | — | — | `<env>` + `destroy` |
+
+A merge to `main` applies dev only. Prod changes only when someone runs the workflow for it, so promoting to prod is a deliberate act. GitHub's required-reviewer rule on environments needs a public repository (or GitHub Enterprise); once this repository is public, the prod environment gets a reviewer and `apply prod` runs after `apply dev` on every merge, waiting for approval.
 
 ### How OIDC trust is scoped
 
@@ -239,12 +243,12 @@ This lab uses a dedicated, tenant-native administrator account rather than a per
 
 An idle workspace costs little, but not nothing: secure cluster connectivity places a NAT gateway in the managed resource group. Clusters (VMs plus DBUs) are the main cost, so use auto-termination and small clusters.
 
-Dev is meant to be paused when idle. From the **Actions** tab, open **terraform**, choose **Run workflow** on `main`, and pick:
+Both environments are meant to be paused when idle. From the **Actions** tab, open **terraform**, choose **Run workflow** on `main`, pick the environment, and pick:
 
-- `destroy` to tear down the dev workspace and its resource group (the NAT gateway goes with it). The lake storage and the Unity Catalog objects stay, with their data.
+- `destroy` to tear down that environment's workspace and its resource group (the NAT gateway goes with it). The lake storage and the Unity Catalog objects stay, with their data.
 - `deploy` to bring it back, in about 10 minutes
 
-State storage, identities, and federation stay in place, so nothing needs re-bootstrapping. Anything that exists only inside the workspace (UI-created notebooks, jobs, clusters) is lost on destroy; keep it in Git or Terraform. A push to `main` that touches `infra/` also redeploys dev.
+State storage, identities, and federation stay in place, so nothing needs re-bootstrapping. Anything that exists only inside the workspace (UI-created notebooks, jobs, clusters) is lost on destroy; keep it in Git or Terraform. A push to `main` that touches `infra/` also redeploys dev; prod stays as it is until you run it.
 
 ---
 
@@ -256,7 +260,8 @@ State storage, identities, and federation stay in place, so nothing needs re-boo
 - [x] Account console access with a dedicated tenant administrator identity
 - [x] Phase 0: rename to `gacme-lakehouse-platform`, `gacme` prefix, modules, dev/prod roots, bootstrap script
 - [x] Phase 1: Unity Catalog (`energy_dev` catalog, `bronze`/`silver`/`gold` schemas), access connector, external location, cluster policies
-- [ ] Phase 1b: prod subscription and identity, `prod` environment with approval gate
+- [ ] Phase 1b: prod subscription and identity, `prod` environment deployed by manual run, catalog isolation
+- [ ] Required-reviewer gate on `prod` (needs the repository to be public)
 - [ ] Account-level groups and entitlements as code (account-scoped Terraform)
 - [ ] Audit and usage monitoring with system tables
 

@@ -5,6 +5,7 @@ module "governance" {
   prefix               = var.prefix
   environment          = "dev"
   domains              = ["energy"]
+  workspace_id         = var.workspace_id
   access_connector_id  = var.access_connector_id
   storage_account_name = var.storage_account_name
   admin_group          = var.admin_group

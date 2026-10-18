@@ -8,6 +8,10 @@ variable "workspace_resource_id" {
   type = string
 }
 
+variable "workspace_id" {
+  type = string
+}
+
 variable "access_connector_id" {
   type = string
 }

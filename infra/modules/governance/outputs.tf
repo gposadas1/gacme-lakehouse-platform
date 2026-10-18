@@ -12,3 +12,7 @@ output "cluster_policy_ids" {
     jobs        = databricks_cluster_policy.jobs.id
   }
 }
+
+output "schema_storage_roots" {
+  value = { for k, s in databricks_schema.layer : k => s.storage_root }
+}

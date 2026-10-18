@@ -11,6 +11,11 @@ variable "domains" {
   type        = set(string)
 }
 
+variable "workspace_id" {
+  description = "Numeric ID of this environment's workspace; the only workspace bound to its catalogs"
+  type        = string
+}
+
 variable "access_connector_id" {
   description = "Resource ID of the Azure Databricks access connector that can read and write the storage account"
   type        = string
