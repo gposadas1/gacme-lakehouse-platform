@@ -8,7 +8,7 @@ on:
     branches: [main]
     paths: ["infra/**", "ci/**", ".github/workflows/**"]
   # Manual runs from the Actions tab: deploy (re)creates an environment's workspace, destroy
-  # tears it down to stop idle cost. Prod runs wait for the prod environment's reviewer either way.
+  # tears it down to stop idle cost. Prod is only ever changed from here.
   workflow_dispatch:
     inputs:
       environment:
@@ -68,16 +68,14 @@ jobs:
       environment: dev
       mode: apply
 
-  # After dev on every merge (or alone from the Actions tab), and only once the reviewer approves.
-  # A skipped apply-dev (manual prod run) doesn't block it; a failed one does.
+  # Manual only: prod changes only when someone runs the workflow for it. GitHub's required
+  # reviewer gate needs a public repo (or Enterprise); add it to the prod environment and
+  # chain this job after apply-dev once the repo is public.
   apply-prod:
     if: >-
-      !cancelled() &&
-      needs.lint.result == 'success' &&
-      contains(fromJSON('["success", "skipped"]'), needs.apply-dev.result) &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || (inputs.environment == 'prod' && inputs.action == 'deploy'))
-    needs: [lint, apply-dev]
+      github.event_name == 'workflow_dispatch' && inputs.environment == 'prod' && inputs.action == 'deploy'
+    needs: lint
     uses: ./.github/workflows/_terraform.yml
     with:
       environment: prod
