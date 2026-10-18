@@ -260,7 +260,7 @@ State storage, identities, and federation stay in place, so nothing needs re-boo
 - [x] Account console access with a dedicated tenant administrator identity
 - [x] Phase 0: rename to `gacme-lakehouse-platform`, `gacme` prefix, modules, dev/prod roots, bootstrap script
 - [x] Phase 1: Unity Catalog (`energy_dev` catalog, `bronze`/`silver`/`gold` schemas), access connector, external location, cluster policies
-- [ ] Phase 1b: prod subscription and identity, `prod` environment deployed by manual run, catalog isolation
+- [x] Phase 1b: prod subscription and identity, `prod` environment deployed by manual run, catalog isolation, per-layer storage, pinned providers
 - [ ] Required-reviewer gate on `prod` (needs the repository to be public)
 - [ ] Account-level groups and entitlements as code (account-scoped Terraform)
 - [ ] Audit and usage monitoring with system tables
