@@ -75,6 +75,9 @@ resource "databricks_schema" "layer" {
 }
 
 # Small, auto-terminating compute only. Admins can still bypass policies; everyone else can't.
+# No custom_tags.project here: the workspace's Azure tags (project, environment, owner, managed)
+# are already applied to every cluster as default tags, and a custom tag with the same key is
+# renamed, which then fails the policy's "project must be present" check.
 resource "databricks_cluster_policy" "single_node" {
   name                  = "${var.prefix}-${var.environment}-single-node"
   max_clusters_per_user = 1
@@ -90,7 +93,6 @@ resource "databricks_cluster_policy" "single_node" {
     "autotermination_minutes"                     = { type = "range", minValue = 10, maxValue = 60, defaultValue = 20 }
     "data_security_mode"                          = { type = "fixed", value = "SINGLE_USER" }
     "azure_attributes.availability"               = { type = "fixed", value = "ON_DEMAND_AZURE", hidden = true }
-    "custom_tags.project"                         = { type = "fixed", value = "${var.prefix}-lakehouse-platform" }
   })
 }
 
@@ -105,6 +107,5 @@ resource "databricks_cluster_policy" "jobs" {
     "autoscale.max_workers"         = { type = "range", maxValue = 2 }
     "data_security_mode"            = { type = "fixed", value = "SINGLE_USER" }
     "azure_attributes.availability" = { type = "fixed", value = "SPOT_WITH_FALLBACK_AZURE", hidden = true }
-    "custom_tags.project"           = { type = "fixed", value = "${var.prefix}-lakehouse-platform" }
   })
 }
