@@ -37,7 +37,7 @@ variable "admin_group" {
 }
 
 variable "node_types" {
-  description = "VM sizes the cluster policies allow; the first is the default"
+  description = "VM sizes the cluster policies allow; the first is the default. The v5 and DSv2 sizes are blocked for the dev subscription in westus2."
   type        = list(string)
-  default     = ["Standard_D4ds_v5", "Standard_DS3_v2"]
+  default     = ["Standard_D4ds_v7", "Standard_D4as_v7"]
 }
